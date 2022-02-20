@@ -1,0 +1,112 @@
+-- GENERATE ARIMA MODEL ON MONTHLY OIL PRODUCTION DATA
+CREATE OR REPLACE MODEL Oil_Production.arima_model
+OPTIONS(
+MODEL_TYPE='ARIMA_PLUS',
+TIME_SERIES_TIMESTAMP_COL='Month', 
+TIME_SERIES_DATA_COL='Oil_Production',
+HOLIDAY_REGION='US',
+AUTO_ARIMA = TRUE,
+DATA_FREQUENCY = 'MONTHLY',
+CLEAN_SPIKES_AND_DIPS = TRUE
+) AS
+
+SELECT 
+    Month,
+    Oil_Production
+FROM
+`forecasting-339006.Oil_Production.monthly_statistics`;
+
+
+-- PREDICT FUTURE VALUES WITH SET CONFIDENCE_LEVELS AND HORIZON
+DECLARE HORIZON STRING DEFAULT "24"; 
+DECLARE CONFIDENCE_LEVEL STRING DEFAULT "0.90";
+
+EXECUTE IMMEDIATE format("""
+    INSERT INTO `forecasting-339006.Oil_Production.production_forecast_test` (forecast_timestamp, forecast_value, standard_error, confidence_level,
+        prediction_interval_lower_bound, prediction_interval_upper_bound, confidence_interval_lower_bound, confidence_interval_upper_bound, 
+        confidence, refresh_date)
+    SELECT
+      *,
+      CONFIDENCE_LEVEL as confidence,
+      CURRENT_DATE() AS refresh_date
+    FROM 
+      ML.FORECAST(MODEL Oil_Production.arima_model, 
+                  STRUCT(%s AS horizon, 
+                         %s AS confidence_level)
+                 )
+    ORDER BY forecast_timestamp
+    """,HORIZON, CONFIDENCE_LEVEL);
+
+
+ -- STACKING ACTUAL AND FORECASTED VALUES TO CREATE A FINAL TABLE
+CREATE OR REPLACE TABLE `forecasting-339006.Oil_Production.actual_forecasted` AS (
+SELECT Month, 
+    Oil_Production, 
+    NULL as Forecasted_Production,
+    NULL as Forecasted_LowerInterval,
+    NULL as Forecasted_UpperInterval,
+    NULL as Confidence_Level,
+    NULL as forecast_interval,
+    NULL as standard_error,
+    NULL as Margin_Of_Error,
+    CURRENT_DATE() as refresh_date
+FROM `forecasting-339006.Oil_Production.monthly_statistics`
+
+UNION ALL
+
+SELECT DATE(forecast_timestamp) as Month, 
+    NULL as Oil_Production,
+    forecast_value as Forecasted_Production,
+    confidence_interval_lower_bound	as Forecasted_LowerInterval,
+    confidence_interval_upper_bound	as Forecasted_UpperInterval,
+    confidence as Confidence_Level,
+    forecast_interval,
+    ROUND(standard_error, 3),
+    ROUND(CASE 
+        WHEN confidence = 0.8 THEN standard_error * 1.28
+        WHEN confidence = 0.85 THEN standard_error * 1.44
+        WHEN confidence = 0.90 THEN standard_error * 1.64
+        WHEN confidence = 0.95 THEN standard_error * 1.96
+    END, 3) as Margin_Of_Error,
+    CURRENT_DATE() as refresh_date
+FROM `forecasting-339006.Oil_Production.production_forecast`
+WHERE refresh_date = (SELECT MAX(refresh_date) FROM `forecasting-339006.Oil_Production.production_forecast`)
+);
+
+
+-- SCHEMA CREATION QUERIES-----
+CREATE OR REPLACE TABLE `forecasting-339006.Oil_Production.monthly_statistics_schema` (
+    `Month`	DATE,
+    `Oil_Production` INT64
+);
+
+
+CREATE OR REPLACE TABLE `forecasting-339006.Oil_Production.production_forecast_schema` (
+    forecast_timestamp	TIMESTAMP,	
+    forecast_value	FLOAT64,	
+    standard_error	FLOAT64,	
+    confidence_level	FLOAT64,	
+    prediction_interval_lower_bound	FLOAT64,	
+    prediction_interval_upper_bound	FLOAT64,	
+    confidence_interval_lower_bound	FLOAT64,	
+    confidence_interval_upper_bound	FLOAT64,	
+    confidence	FLOAT64,	
+    forecast_interval	STRING,	
+    refresh_date	DATE
+);
+
+
+CREATE OR REPLACE TABLE `forecasting-339006.Oil_Production.actual_forecasted_schema` (
+    `Month`	DATE,
+    `Oil_Production`	INT64,
+    `Forecasted_Production`	FLOAT64,
+    `Forecasted_LowerInterval`	FLOAT64,
+    `Forecasted_UpperInterval`	FLOAT64,	
+    `Confidence_Level`	FLOAT64,
+    `forecast_interval`	STRING,	
+    `standard_error`	FLOAT64,
+    `Margin_Of_Error`	FLOAT64,	
+    `refresh_date`	DATE
+);
+
+
